@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Procesar CCs</title>
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+</head>
+<body>
+    <h1>Subir archivo ccs.txt</h1>
+    <form id="upload-form" enctype="multipart/form-data">
+        <input type="file" name="ccs_file" accept=".txt" required>
+        <button type="submit">Procesar</button>
+    </form>
+
+    <h2>Resultados:</h2>
+    <ul id="messages"></ul>
+    <a id="download-link" href="/download" style="display:none">📥 Descargar lives.txt</a>
+
+    <script>
+    $("#upload-form").submit(function(e){
+        e.preventDefault();
+        var formData = new FormData(this);
+        $.ajax({
+            url: "/upload",
+            type: "POST",
+            data: formData,
+            contentType: false,
+            processData: false,
+            success: function(data){
+                if(data.status === "started"){
+                    $("#messages").append("<li>✅ Procesando...</li>");
+                    var interval = setInterval(function(){
+                        $.get("/progress", function(progress){
+                            $("#messages").empty();
+                            progress.results.forEach(function(msg){
+                                $("#messages").append("<li>"+msg+"</li>");
+                            });
+                            if(progress.results.length > 0 && progress.results.slice(-1)[0].includes("Progreso")){
+                                // Seguir
+                            } else {
+                                clearInterval(interval);
+                                $("#download-link").show();
+                            }
+                        });
+                    }, 2000);
+                } else {
+                    alert(data.message);
+                }
+            }
+        });
+    });
+    </script>
+</body>
+  </html>
