@@ -1,4 +1,2 @@
-fastapi
-uvicorn
-requests
-python-multipart
+Flask==2.3.5
+requests==2.32.4
